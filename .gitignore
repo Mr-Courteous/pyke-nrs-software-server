@@ -1,0 +1,62 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Environment variables & secrets
+.env
+.env.*
+!.env.example
+crypto_keys.txt
+*.pem
+*.key
+*.cert
+*.crt
+*.pfx
+*.p12
+
+# QuickBooks Web Connector setup files
+*.qwc
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Test coverage & runtime data
+coverage/
+.nyc_output/
+*.pid
+*.seed
+*.pid.lock
+
+# Build & temporary files
+dist/
+build/
+temp/
+tmp/
+
+# SQLite databases & Prisma local files (if used locally)
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Editor and OS files
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+ehthumbs.db
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+

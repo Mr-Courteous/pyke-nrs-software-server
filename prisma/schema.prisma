@@ -1,0 +1,152 @@
+// NRS SI middleware: collect invoices from accounting software, then IRN, signing and QR.
+// Nothing here sends anything to NRS.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model Invoice {
+  id           String   @id @default(uuid())
+  // RECEIVED -> MAPPED -> VALIDATED -> SIGNED -> READY   (REJECTED / ERROR stop it with a reason)
+  status       String   @default("RECEIVED")
+  sourceSystem String?  // manual-upload | quickbooks-desktop | sage300 | sage200 | canonical
+  // The source system's own id for the invoice (with the connection's id in front), so a
+  // connector that sends the same invoice twice never creates two.
+  sourceRef    String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  raw          Json?
+  mapped       Json?
+  errors       Json?
+  signature    Json?
+  irn          String?
+  qr           Json?
+  errorMessage String?
+
+  history      InvoiceHistoryEntry[]
+
+  // The company (NRS business) this invoice is issued for. A connection can be tied to one
+  // company, so its invoices get an IRN and QR as soon as they arrive.
+  businessId   String?
+  business     Business? @relation(fields: [businessId], references: [id], onDelete: SetNull)
+
+  @@unique([sourceSystem, sourceRef])
+  @@index([createdAt])
+  @@index([status])
+  @@index([businessId])
+}
+
+model Business {
+  id            String   @id @default(uuid())
+  name          String
+  tin           String?
+  address       String?
+  email         String?
+  // The Business ID NRS issued (not needed for IRN and QR; kept for sending later).
+  nrsBusinessId String?  @unique
+  // The 8-character Service ID NRS issued: the fixed middle part of every IRN.
+  irnSuffix     String?
+  phone         String?
+  city          String?
+  postalZone    String?
+  state         String?  // name or ISO code, e.g. "Lagos" or "NG-LA"
+  lga           String?  // NRS LGA code, e.g. "NG-LA-IKJ"
+  // From the NRS portal's crypto_keys.txt. Both are public material; no private key is stored.
+  publicKey     String?
+  certificate   String?
+  source        String   @default("LOCAL")
+  active        Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  invoices      Invoice[]
+  connections   SourceConnection[]
+}
+
+model InvoiceHistoryEntry {
+  id        Int      @id @default(autoincrement())
+  invoice   Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  invoiceId String
+  status    String
+  at        DateTime @default(now())
+
+  @@index([invoiceId])
+}
+
+// A source system's access to this app: one per accounting-software installation.
+// The key is shown once when created; only its SHA-256 hash is stored.
+model SourceConnection {
+  id            String    @id @default(uuid())
+  name          String
+  // quickbooks-desktop | sage300 | sage200 | canonical
+  sourceType    String
+  keyPrefix     String
+  keyHash       String    @unique
+  active        Boolean   @default(true)
+  // Invoices from this connection are issued for this company, if set.
+  businessId    String?
+  business      Business? @relation(fields: [businessId], references: [id], onDelete: SetNull)
+  // How to read this system's native invoice JSON (used by sage300 / sage200); see
+  // src/ingestion/normalizers/fieldMap.js. Null means the connector sends the standard shape.
+  fieldMap      Json?
+  // QuickBooks Desktop: invoices modified since this time are fetched next (a qbXML date-time, as QuickBooks gave it).
+  syncCursor    String?
+  lastSeenAt    DateTime?
+  lastInvoiceAt DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+}
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String
+  name         String?
+  role         String   @default("VIEWER") // ADMIN | FINANCE | VIEWER
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+/// HSN code + product category per item sold. NRS needs both on every invoice line and the
+/// accounting software has no field for them, so they are kept here, keyed by source and item.
+model ProductCode {
+  id              String   @id @default(uuid())
+  source          String
+  externalRef     String
+  name            String
+  hsnCode         String?
+  productCategory String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([source, externalRef])
+}
+
+/// Buyer details the source system does not hold (TIN, state, LGA ...), entered once per customer.
+model CustomerDetail {
+  id          String   @id @default(uuid())
+  source      String
+  externalRef String
+  name        String
+  tin         String?
+  email       String?
+  phone       String?
+  street      String?
+  city        String?
+  state       String?
+  lga         String?
+  postalZone  String?
+  observed    Json?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([source, externalRef])
+}
