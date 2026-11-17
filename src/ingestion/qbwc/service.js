@@ -43,13 +43,16 @@ function queryXml(session) {
   const attrs = session.iteratorId
     ? ` requestID="2" iterator="Continue" iteratorID="${esc(session.iteratorId)}"`
     : ' requestID="1" iterator="Start"';
+  const filter = session.connection.syncCursor
+    ? `<ModifiedDateRangeFilter><FromModifiedDate>${esc(session.connection.syncCursor)}</FromModifiedDate></ModifiedDateRangeFilter>`
+    : '';
   return (
     '<?xml version="1.0" encoding="utf-8"?>' +
     `<?qbxml version="${session.version}"?>` +
     '<QBXML><QBXMLMsgsRq onError="stopOnError">' +
     `<InvoiceQueryRq${attrs}>` +
     `<MaxReturned>${PAGE}</MaxReturned>` +
-    `<ModifiedDateRangeFilter><FromModifiedDate>${esc(session.connection.syncCursor)}</FromModifiedDate></ModifiedDateRangeFilter>` +
+    filter +
     '<IncludeLineItems>true</IncludeLineItems>' +
     '</InvoiceQueryRq></QBXMLMsgsRq></QBXML>'
   );
@@ -58,12 +61,18 @@ function queryXml(session) {
 const later = (a, b) => (!a || Date.parse(b) > Date.parse(a) ? b : a);
 
 const handlers = {
-  async authenticate({ strUserName, strPassword }) {
+  async authenticate(params) {
+    const { strUserName, strPassword } = params || {};
+    console.log('[QBWC] authenticate called:', { strUserName, hasPassword: Boolean(strPassword) });
     sweep();
     const connection = await connectors.authenticateForUser(strUserName, strPassword);
-    if (!connection || connection.sourceType !== 'quickbooks-desktop') return ['', 'nvu']; // not a valid user
+    if (!connection || connection.sourceType !== 'quickbooks-desktop') {
+      console.log('[QBWC] authenticate: Authentication failed (nvu)');
+      return ['', 'nvu']; // not a valid user
+    }
     const ticket = crypto.randomUUID();
     sessions.set(ticket, { connection, iteratorId: null, maxModified: null, count: 0, errors: [], error: '', version: '8.0', created: Date.now() });
+    console.log('[QBWC] authenticate: Success. Ticket generated:', ticket);
     return [ticket, '']; // empty company file name: use the company file that is open in QuickBooks
   },
 
@@ -88,23 +97,43 @@ const handlers = {
     return xml;
   },
 
-  async receiveResponseXML({ ticket, response, hresult, message }) {
+  async receiveResponseXML(params) {
+    const { ticket, response, hresult, message } = params || {};
+    console.log('[QBWC] receiveResponseXML called:', {
+      ticket,
+      hresult,
+      message,
+      responsePreview: response?.slice(0, 1500),
+    });
     const session = sessions.get(ticket);
-    if (!session) return -1;
-    if (hresult) { session.error = `QuickBooks reported ${hresult}: ${message || 'no message'}`; return -1; }
+    if (!session) {
+      console.log(`[QBWC] receiveResponseXML: No session found for ticket "${ticket}". (Active sessions in memory: ${sessions.size}).`);
+      return -1;
+    }
+    if (hresult) {
+      session.error = `QuickBooks reported ${hresult}: ${message || 'no message'}`;
+      console.log('[QBWC] receiveResponseXML: Error reported from QuickBooks:', session.error);
+      return -1;
+    }
 
     let rs;
     try {
       rs = qbParser.parse(String(response || '')).QBXML?.QBXMLMsgsRs?.InvoiceQueryRs;
     } catch (err) {
       session.error = `Could not read QuickBooks' answer: ${err.message}`;
+      console.log('[QBWC] receiveResponseXML: Parser error:', session.error);
       return -1;
     }
-    if (!rs) { session.error = 'QuickBooks sent no invoice answer.'; return -1; }
+    if (!rs) {
+      session.error = 'QuickBooks sent no invoice answer.';
+      console.log('[QBWC] receiveResponseXML: No invoice answer found in XML.');
+      return -1;
+    }
 
     const code = String(rs['@_statusCode'] ?? '0');
     if (code !== '0' && code !== '1') { // 1 = nothing matched, which is fine
       session.error = `QuickBooks refused the request (${code}): ${rs['@_statusMessage'] || ''}`;
+      console.log('[QBWC] receiveResponseXML: Request refused:', session.error);
       return -1;
     }
 
@@ -118,33 +147,47 @@ const handlers = {
         if (!rec.duplicate) session.count += 1;
       } catch (err) {
         session.errors.push(`${inv.RefNumber || inv.TxnID || 'an invoice'}: ${err.message}`);
+        console.log('[QBWC] receiveResponseXML: Error processing invoice:', err.message);
       }
     }
 
     const remaining = Number(rs['@_iteratorRemainingCount'] || 0);
     if (remaining > 0 && rs['@_iteratorID']) {
       session.iteratorId = rs['@_iteratorID'];
+      console.log(`[QBWC] receiveResponseXML: More pages remaining (${remaining}). Returning 50.`);
       return 50; // less than 100: the Web Connector asks for the next page
     }
 
     // Everything was taken in: only now does the cursor move, so a failed run is simply repeated.
-    if (session.maxModified) await connectors.setCursor(session.connection.id, session.maxModified);
+    if (session.maxModified) {
+      console.log('[QBWC] receiveResponseXML: Advancing sync cursor to:', session.maxModified);
+      await connectors.setCursor(session.connection.id, session.maxModified);
+    }
     if (session.count > 0) await connectors.touchInvoice(session.connection.id).catch(() => {});
+    console.log(`[QBWC] receiveResponseXML: Finished batch. Invoices imported: ${session.count}. Returning 100.`);
     return 100;
   },
 
-  async getLastError({ ticket }) {
+  async getLastError(params) {
+    console.log('[QBWC] getLastError called:', params);
+    const { ticket } = params || {};
     const s = sessions.get(ticket);
-    return s?.error || '';
+    const err = s?.error || '';
+    console.log('[QBWC] getLastError returning:', err);
+    return err;
   },
 
-  async connectionError({ ticket, hresult, message }) {
+  async connectionError(params) {
+    console.log('[QBWC] connectionError called:', params);
+    const { ticket, hresult, message } = params || {};
     const s = sessions.get(ticket);
     if (s) s.error = `QuickBooks could not be reached: ${hresult || ''} ${message || ''}`.trim();
     return 'done'; // ends the session
   },
 
-  async closeConnection({ ticket }) {
+  async closeConnection(params) {
+    console.log('[QBWC] closeConnection called:', params);
+    const { ticket } = params || {};
     sessions.delete(ticket);
     return 'OK';
   },
