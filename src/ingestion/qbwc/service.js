@@ -67,11 +67,25 @@ const handlers = {
     return [ticket, '']; // empty company file name: use the company file that is open in QuickBooks
   },
 
-  async sendRequestXML({ ticket, qbXMLMajorVers, qbXMLMinorVers }) {
+  async sendRequestXML(params) {
+    const { ticket, qbXMLMajorVers, qbXMLMinorVers } = params || {};
+    console.log('[QBWC] sendRequestXML called with params:', params);
     const session = sessions.get(ticket);
-    if (!session) return ''; // an empty request ends the session
+    if (!session) {
+      console.log(`[QBWC] sendRequestXML: No session found for ticket "${ticket}". (Active sessions in memory: ${sessions.size}). Returning empty string to end session.`);
+      return ''; // an empty request ends the session
+    }
     session.version = pickVersion(qbXMLMajorVers, qbXMLMinorVers);
-    return queryXml(session);
+    console.log('[QBWC] sendRequestXML: Found active session for connection:', {
+      connectionId: session.connection?.id,
+      connectionName: session.connection?.name,
+      syncCursor: session.connection?.syncCursor,
+      iteratorId: session.iteratorId,
+      resolvedVersion: session.version,
+    });
+    const xml = queryXml(session);
+    console.log('[QBWC] sendRequestXML: Generated request XML:', xml);
+    return xml;
   },
 
   async receiveResponseXML({ ticket, response, hresult, message }) {
