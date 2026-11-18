@@ -63,11 +63,31 @@ model Business {
   certificate   String?
   source        String   @default("LOCAL")
   active        Boolean  @default(true)
+  apiKeyPrefix  String?
+  apiKeyHash    String?  @unique
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
   invoices      Invoice[]
   connections   SourceConnection[]
+  apiKeys       ApiKey[]
+}
+
+/// Direct REST API key linked to a business for server-to-server invoice ingestion.
+/// The raw key is shown only once when generated; only its SHA-256 hash is stored.
+model ApiKey {
+  id         String    @id @default(uuid())
+  name       String    @default("Default")
+  keyPrefix  String
+  keyHash    String    @unique
+  active     Boolean   @default(true)
+  businessId String
+  business   Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  lastUsedAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@index([businessId])
 }
 
 model InvoiceHistoryEntry {
