@@ -8,9 +8,11 @@ const { test, before, after, describe } = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const path = require('node:path');
+const { makeKeys } = require('./helpers');
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+const testKeys = makeKeys();
 const clone = (v) => structuredClone(v);
 
 function stub(rel, exports) {
@@ -47,7 +49,7 @@ const fakeStore = {
 
 // Business store
 const bizMap = new Map([
-  ['biz-99', { id: 'biz-99', name: 'Acme Ltd', tin: '11111111-0001', active: true, irnSuffix: 'TEST01', hasServiceId: true, nrsBusinessId: 'nrs-99', publicKey: null, certificate: null, email: null, phone: null, address: null, city: null, postalZone: null, state: null, lga: null }],
+  ['biz-99', { id: 'biz-99', name: 'Acme Ltd', tin: '11111111-0001', active: true, irnSuffix: 'TEST01', hasServiceId: true, nrsBusinessId: 'nrs-99', publicKey: testKeys.publicKey, certificate: testKeys.certificate, email: 'acme@example.com', phone: '+2348000000000', address: '1 Acme Way', city: 'Ikeja', postalZone: '100271', state: 'Lagos', lga: 'NG-LA-IKJ' }],
 ]);
 const fakeBusinessStore = {
   async get(id) { const b = bizMap.get(id); if (!b) return null; const { publicKey, certificate, ...rest } = b; return clone(rest); },
@@ -125,7 +127,7 @@ const invoice = (over = {}) => ({
     lga: 'NG-LA-IKJ', postalZone: '100271', country: 'NG',
   },
   items: [
-    { description: 'Widget A', productRef: 'W1', quantity: 2, unitPrice: 1000 },
+    { description: 'Widget A', productRef: 'W1', quantity: 2, unitPrice: 1000, hsnCode: '2523.29', productCategory: 'Cements' },
   ],
   ...over,
 });
@@ -236,3 +238,146 @@ describe('POST /api/ingest/direct', () => {
     assert.equal(body.results[1].index, 1);
   });
 });
+
+describe('POST /api/invoices/ingest & /api/v1/invoices', () => {
+
+  test('401 — missing X-API-Key header', async () => {
+    const res = await fetch(`${baseUrl}/invoices/ingest`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(invoice({ invoiceNumber: 'AUTH-FAIL-1' })),
+    });
+    assert.equal(res.status, 401);
+    const body = await res.json();
+    assert.equal(body.error, 'Missing or invalid API key.');
+  });
+
+  test('401 — invalid API key', async () => {
+    const res = await fetch(`${baseUrl}/invoices/ingest`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': 'nak_invalid' },
+      body: JSON.stringify(invoice({ invoiceNumber: 'AUTH-FAIL-2' })),
+    });
+    assert.equal(res.status, 401);
+  });
+
+  test('400 — empty request body', async () => {
+    const res = await fetch(`${baseUrl}/invoices/ingest`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': API_KEY },
+      body: JSON.stringify({}),
+    });
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.match(body.error, /Invoice payload is required/);
+  });
+
+  test('400 — validation failure when items array is empty', async () => {
+    const res = await fetch(`${baseUrl}/invoices/ingest`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': API_KEY },
+      body: JSON.stringify(invoice({ invoiceNumber: 'INV-BAD-ITEMS', items: [] })),
+    });
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.equal(body.status, 'REJECTED');
+    assert.ok(Array.isArray(body.errors));
+    assert.ok(body.errors.some((e) => e.includes('at least one line item')));
+  });
+
+  test('201 — B2B transaction: validates, generates IRN, signs, binds to businessId', async () => {
+    const invData = invoice({
+      invoiceNumber: 'B2B-1001',
+      issueDate: '2026-10-15',
+      buyer: {
+        ref: 'C-B2B',
+        name: 'Enterprise Client Ltd',
+        tin: '55555555-0001',
+        email: 'billing@enterprise.com',
+        street: '42 Commercial Ave',
+        address: '42 Commercial Ave, Ikeja',
+        city: 'Ikeja',
+        state: 'Lagos',
+        lga: 'NG-LA-IKJ',
+        postalZone: '100271',
+        country: 'NG',
+      },
+    });
+
+    const res = await fetch(`${baseUrl}/invoices/ingest`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': API_KEY },
+      body: JSON.stringify(invData),
+    });
+
+    assert.equal(res.status, 201);
+    const body = await res.json();
+    assert.equal(body.status, 'READY');
+    assert.ok(body.id, 'id is present');
+    assert.equal(body.irn, 'B2B1001-TEST01-20261015');
+    assert.ok(body.signature, 'signature is present');
+    assert.equal(body.signature.method, 'NRS MBS IRN signing: RSA (PKCS#1 v1.5) encryption of IRN.timestamp + certificate');
+    assert.ok(body.signature.signedMessage.startsWith('B2B1001-TEST01-20261015.'));
+    assert.ok(body.confirmationTimestamp, 'confirmationTimestamp is present');
+    assert.ok(body.qr, 'qr is present');
+
+    // Verify it is bound to the authenticated business in storage
+    const saved = await fakeStore.get(body.id);
+    assert.equal(saved.businessId, 'biz-99', 'strictly bound to authenticated req.business.id');
+  });
+
+  test('201 — B2C transaction: passes validation without buyer TIN and generates IRN & signature', async () => {
+    const invData = invoice({
+      invoiceNumber: 'B2C-2001',
+      issueDate: '2026-10-16',
+      transactionType: 'B2C',
+      buyer: {
+        ref: 'WALK-IN',
+        name: 'Jane Doe',
+        // Note: No TIN for B2C consumer!
+        email: 'janedoe@example.com',
+        street: '15 Residential St',
+        address: '15 Residential St, Ikeja',
+        city: 'Ikeja',
+        state: 'Lagos',
+        lga: 'NG-LA-IKJ',
+        postalZone: '100271',
+        country: 'NG',
+      },
+    });
+
+    const res = await fetch(`${baseUrl}/invoices/ingest`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': API_KEY },
+      body: JSON.stringify(invData),
+    });
+
+    assert.equal(res.status, 201);
+    const body = await res.json();
+    assert.equal(body.status, 'READY');
+    assert.equal(body.irn, 'B2C2001-TEST01-20261016');
+    assert.ok(body.signature, 'signature should be generated for B2C');
+    assert.ok(body.confirmationTimestamp);
+  });
+
+  test('201 — works on alias endpoint POST /api/v1/invoices', async () => {
+    const invData = invoice({
+      invoiceNumber: 'V1-3001',
+      issueDate: '2026-10-17',
+    });
+
+    const res = await fetch(`${baseUrl}/v1/invoices`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': API_KEY },
+      body: JSON.stringify(invData),
+    });
+
+    assert.equal(res.status, 201);
+    const body = await res.json();
+    assert.equal(body.status, 'READY');
+    assert.equal(body.irn, 'V13001-TEST01-20261017');
+    assert.ok(body.signature);
+    assert.ok(body.confirmationTimestamp);
+  });
+});
+

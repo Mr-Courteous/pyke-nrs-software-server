@@ -23,10 +23,18 @@ function validateInvoice(invoice, { deferSupplier = false } = {}) {
   const errors = [];
   const warnings = [];
 
+  const isB2C = Boolean(
+    invoice?.sourceFlags?.isB2C ||
+    String(invoice?.[NRS_CATEGORIES.INVOICE_META]?.transactionType || '').toUpperCase() === 'B2C' ||
+    String(invoice?.[NRS_CATEGORIES.INVOICE_META]?.invoiceKind || '').toUpperCase() === 'B2C' ||
+    String(invoice?.[NRS_CATEGORIES.INVOICE_META]?.invoiceType || '').toUpperCase() === 'B2C'
+  );
+
   for (const [category, fields] of Object.entries(REQUIRED_FIELDS)) {
     if (category === NRS_CATEGORIES.SECURITY) continue;
     if (deferSupplier && category === NRS_CATEGORIES.SUPPLIER) continue; // the company supplies these on assignment
     for (const field of fields) {
+      if (isB2C && category === NRS_CATEGORIES.BUYER && field === 'tin') continue;
       if (blank(invoice[category]?.[field])) errors.push(`Missing required field: ${category}.${field}`);
     }
   }

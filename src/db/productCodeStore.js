@@ -25,18 +25,30 @@ function createProductCodeStore(getPrisma) {
     const wanted = new Map();
     for (const it of items) {
       const k = keyOf(it);
-      if (k && !wanted.has(k)) wanted.set(k, it.productName || it.description || k);
+      if (k && !wanted.has(k)) {
+        wanted.set(k, {
+          name: it.productName || it.description || k,
+          hsnCode: it.hsnCode || null,
+          productCategory: it.productCategory || null,
+        });
+      }
     }
     await prisma.productCode.createMany({
-      data: [...wanted].map(([externalRef, name]) => ({ source, externalRef, name })),
+      data: [...wanted].map(([externalRef, info]) => ({
+        source,
+        externalRef,
+        name: info.name,
+        hsnCode: info.hsnCode,
+        productCategory: info.productCategory,
+      })),
       skipDuplicates: true,
     });
     const rows = await prisma.productCode.findMany({ where: { source, externalRef: { in: [...wanted.keys()] } } });
     const byKey = new Map(rows.map((r) => [r.externalRef, r]));
     for (const it of items) {
       const row = byKey.get(keyOf(it));
-      it.hsnCode = row?.hsnCode || null;
-      it.productCategory = row?.productCategory || null;
+      it.hsnCode = row?.hsnCode || it.hsnCode || null;
+      it.productCategory = row?.productCategory || it.productCategory || null;
     }
     return mapped;
   }

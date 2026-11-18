@@ -103,3 +103,4 @@ async function remove(id, businessId) {
 }
 
 module.exports = { create, list, rotate, revoke, remove };
+

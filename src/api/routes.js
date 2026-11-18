@@ -1,4 +1,5 @@
 const express = require('express');
+const crypto = require('crypto');
 const { processInvoice, retryInvoice, assignBusiness } = require('../pipeline');
 const store = require('../db/store');
 const businessStore = require('../db/businessStore');
@@ -325,6 +326,59 @@ router.post('/ingest/direct', requireApiKey, async (req, res) => {
   }
 
   res.status(results.every((r) => r.ok) ? 200 : 207).json({ results });
+});
+
+// ---- Direct Invoice Ingestion: Single Invoice REST Endpoint ------------------
+//
+//   POST /api/invoices/ingest
+//   POST /api/v1/invoices
+//   Header: X-API-Key: nak_...
+//   Body: raw JSON invoice payload representing B2B/B2G or B2C transaction.
+//   Strictly bound to authenticated req.business.id.
+//   Returns 201 Created with status, generated IRN, digital signature, confirmation timestamp.
+
+router.post(['/invoices/ingest', '/v1/invoices'], requireApiKey, async (req, res) => {
+  try {
+    const raw = req.body?.invoice || req.body;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw) || Object.keys(raw).length === 0) {
+      return res.status(400).json({ error: 'Invoice payload is required as a JSON object.' });
+    }
+
+    const { id: businessId } = req.business;
+    const { id: apiKeyId } = req.apiKey;
+
+    const invoiceNumber = raw.invoiceNumber || raw.invoiceId;
+    const clientRef = raw.sourceRef || invoiceNumber || crypto.randomUUID();
+    const sourceRef = `direct:${businessId}:${apiKeyId}:${clientRef}`;
+
+    const inv = await processInvoice(raw, 'canonical', {
+      sourceRef,
+      businessId,
+    });
+
+    if (inv.status === 'REJECTED' || inv.status === 'ERROR') {
+      return res.status(400).json({
+        error: 'Invoice validation or processing failed.',
+        id: inv.id,
+        status: inv.status,
+        errors: inv.errors || (inv.errorMessage ? [inv.errorMessage] : []),
+        confirmationTimestamp: new Date().toISOString(),
+      });
+    }
+
+    return res.status(201).json({
+      id: inv.id,
+      status: inv.status,
+      irn: inv.irn,
+      signature: inv.signature,
+      qr: inv.qr || null,
+      confirmationTimestamp: new Date().toISOString(),
+      duplicate: Boolean(inv.duplicate),
+      invoice: inv,
+    });
+  } catch (err) {
+    fail(res, err, 500);
+  }
 });
 
 module.exports = router;

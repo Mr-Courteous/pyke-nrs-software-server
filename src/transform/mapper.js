@@ -26,6 +26,8 @@ function mapToNrsSchema(raw, sourceSystem = 'unknown') {
       unitPrice,
       lineTotal: round2(it.lineTotal ?? quantity * unitPrice),
       productCode: it.productCode || it.sku || null,
+      hsnCode: it.hsnCode || null,
+      productCategory: it.productCategory || null,
       productRef: it.productRef || null,                                   // the source system's item id
       productName: it.productName || it.name || it.description || null,
       unit: it.unit || null,
@@ -53,6 +55,12 @@ function mapToNrsSchema(raw, sourceSystem = 'unknown') {
   const vatRate = Math.max(...breakdown.filter((t) => t.taxableAmount > 0).map((t) => t.percent), 0);
   const grandTotal = round2(raw.grandTotal ?? subtotal + vatAmount);
 
+  const isB2C = Boolean(
+    raw.isB2C ||
+    raw.buyer?.isB2C ||
+    String(raw.transactionType || raw.invoiceKind || raw.invoiceType || raw.customerType || raw.buyer?.type || raw.buyer?.customerType || '').toUpperCase() === 'B2C'
+  );
+
   const s = raw.supplier || {};
   const b = raw.buyer || {};
   return {
@@ -78,6 +86,7 @@ function mapToNrsSchema(raw, sourceSystem = 'unknown') {
       issueDate: raw.issueDate ? String(raw.issueDate).slice(0, 10) : '',
       currency: raw.currency || 'NGN',
       invoiceType: raw.invoiceType || 'Standard Tax Invoice', // internal label; the NRS type code is set in nrs/nrsCodes.js
+      transactionType: isB2C ? 'B2C' : (raw.transactionType || raw.invoiceKind || 'B2B'),
       dueDate: raw.dueDate || null,
     },
     [NRS_CATEGORIES.LINE_ITEMS]: { items },
@@ -85,7 +94,7 @@ function mapToNrsSchema(raw, sourceSystem = 'unknown') {
     [NRS_CATEGORIES.TOTALS]: { subtotal, taxTotal: vatAmount, grandTotal },
     [NRS_CATEGORIES.PAYMENT]: { paymentMeans: raw.paymentMeans || 'Bank Transfer', dueDate: raw.dueDate || null },
     [NRS_CATEGORIES.SECURITY]: {}, // filled in later by the IRN / signing / QR stages
-    sourceFlags: { taxInclusive: !!raw.taxInclusive, hasDiscount: !!raw.hasDiscount },
+    sourceFlags: { taxInclusive: !!raw.taxInclusive, hasDiscount: !!raw.hasDiscount, isB2C },
   };
 }
 
